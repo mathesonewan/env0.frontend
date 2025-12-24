@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>env0 terminal</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <div id="app" class="app fx-on" data-mode="terminal">
+      <div class="chrome">
+        <div class="brand">env0.terminal</div>
+        <div class="status">
+          <span id="connStatus" class="pill is-offline">offline</span>
+          <button id="fxToggle" class="pill is-action" type="button">FX: on</button>
+        </div>
+      </div>
+
+      <div id="scrollback" class="scrollback" aria-live="polite"></div>
+      <button id="jumpLatest" class="jump-latest" type="button">Jump to latest</button>
+
+      <div id="promptRow" class="prompt-row">
+        <span id="promptUser" class="prompt-seg"></span>
+        <span id="promptHost" class="prompt-seg"></span>
+        <span id="promptCwd" class="prompt-seg"></span>
+        <span id="promptSymbol" class="prompt-seg">$</span>
+        <input
+          id="promptInput"
+          class="prompt-input"
+          type="text"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+        />
+      </div>
+
+      <div class="overlay scanlines" aria-hidden="true"></div>
+      <div class="overlay vignette" aria-hidden="true"></div>
+      <div class="overlay glow" aria-hidden="true"></div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

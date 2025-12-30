@@ -1,8 +1,18 @@
 (() => {
   const MAX_LINES = 1000;
+  const TYPING = {
+    enabled: true,
+    charDelayMs: 14,
+    lineDelayMs: 40,
+    maxCharsPerLine: 600,
+    sceneIntroDelayMs: 260,
+    scenePaddingLines: 2
+  };
   const scrollback = document.getElementById("scrollback");
   const promptRow = document.getElementById("promptRow");
   const promptInput = document.getElementById("promptInput");
+  const storyInputRow = document.getElementById("storyInputRow");
+  const storyInput = document.getElementById("storyInput");
   const promptUser = document.getElementById("promptUser");
   const promptHost = document.getElementById("promptHost");
   const promptCwd = document.getElementById("promptCwd");
@@ -16,19 +26,29 @@
   let mode = "terminal";
   let lineQueue = [];
   let flushScheduled = false;
+  let typingQueue = [];
+  let typingActive = false;
   let history = [];
   let historyIndex = -1;
   let historyDraft = "";
   let currentChoices = [];
   let autoScroll = true;
+  let pendingChoice = false;
+  let awaitingAdvance = false;
+  let advanceRequested = false;
+  let pendingScene = null;
+  let advancePromptShown = false;
 
   const setMode = (value) => {
     mode = value === "story" ? "story" : "terminal";
     app.dataset.mode = mode;
     if (mode === "story") {
       promptRow.classList.add("is-hidden");
+      storyInputRow.classList.remove("is-hidden");
+      storyInput.focus();
     } else {
       promptRow.classList.remove("is-hidden");
+      storyInputRow.classList.add("is-hidden");
       promptInput.focus();
     }
   };
@@ -38,6 +58,7 @@
     connStatus.classList.toggle("is-online", online);
     connStatus.classList.toggle("is-offline", !online);
     promptInput.disabled = !online;
+    storyInput.disabled = !online;
   };
 
   const scrollToBottom = () => {
@@ -72,10 +93,22 @@
     return el;
   };
 
-  const appendLine = (text, type) => {
+  const enqueueTyping = (text, type) =>
+    new Promise((resolve) => {
+      typingQueue.push({ text, type, resolve });
+      runTypingQueue();
+    });
+
+  const appendLineInternal = (text, type) => {
+    if (TYPING.enabled) {
+      return enqueueTyping(text, type);
+    }
     lineQueue.push({ text, type });
     scheduleFlush();
+    return Promise.resolve();
   };
+
+  const appendLine = (text, type) => appendLineInternal(text, type);
 
   const updateLastLine = (text, type) => {
     const last = scrollback.lastElementChild;
@@ -91,6 +124,7 @@
     if (autoScroll) {
       scrollToBottom();
     }
+    updateJumpButton();
   };
 
   const scheduleFlush = () => {
@@ -116,6 +150,13 @@
     scrollback.textContent = "";
   };
 
+  const addBlankLines = async (count) => {
+    if (count <= 0) return;
+    for (let i = 0; i < count; i += 1) {
+      await appendLine(" ", "spacer");
+    }
+  };
+
   const updatePrompt = (payload) => {
     promptUser.textContent = payload.user ? `${payload.user}@` : "";
     promptHost.textContent = payload.host ? payload.host : "";
@@ -128,27 +169,69 @@
     appendLine(`${prompt}${text}`, "standard");
   };
 
-  const renderStoryScene = (scene) => {
+  const renderStoryScene = async (scene) => {
     currentChoices = [];
-    const fragment = document.createDocumentFragment();
+    storyInput.disabled = false;
+    storyInput.value = "";
+    if (TYPING.enabled && TYPING.sceneIntroDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, TYPING.sceneIntroDelayMs));
+    }
+    await addBlankLines(TYPING.scenePaddingLines);
     const lines = String(scene.text || "").split(/\r?\n/);
-    lines.forEach((line) => {
-      fragment.appendChild(createLineEl(line, "standard"));
-    });
+    if (TYPING.enabled) {
+      for (const line of lines) {
+        await enqueueTyping(line, "standard");
+      }
+    } else {
+      const fragment = document.createDocumentFragment();
+      lines.forEach((line) => {
+        fragment.appendChild(createLineEl(line, "standard"));
+      });
+      scrollback.appendChild(fragment);
+      capScrollback();
+      if (autoScroll) {
+        scrollToBottom();
+      }
+      updateJumpButton();
+    }
+
+    await addBlankLines(1);
     if (Array.isArray(scene.choices)) {
+      const fragment = document.createDocumentFragment();
       scene.choices.forEach((choice, index) => {
         const label = typeof choice === "string" ? choice : choice.text || "";
         const lineText = `${index + 1}) ${label}`;
         fragment.appendChild(createLineEl(lineText, "choice", true, index + 1));
         currentChoices.push(choice);
       });
+      scrollback.appendChild(fragment);
+      capScrollback();
+      if (autoScroll) {
+        scrollToBottom();
+      }
+      updateJumpButton();
     }
-    scrollback.appendChild(fragment);
-    capScrollback();
-    if (autoScroll) {
-      scrollToBottom();
-    }
-    updateJumpButton();
+  };
+
+  const handleOutcomeLine = (text) => {
+    awaitingAdvance = true;
+    advanceRequested = false;
+    pendingChoice = false;
+    storyInput.disabled = true;
+    advancePromptShown = true;
+    const trimmed = String(text || "").trim();
+    const label = trimmed ? `${trimmed} (press enter)` : "(press enter)";
+    addBlankLines(1).then(() => {
+      appendLine(label, "system").then(() => {
+        if (advanceRequested && pendingScene) {
+          advanceRequested = false;
+          awaitingAdvance = false;
+          clearScrollback();
+          renderStoryScene(pendingScene);
+          pendingScene = null;
+        }
+      });
+    });
   };
 
   const handleChoice = (index) => {
@@ -156,6 +239,10 @@
     const choiceIndex = Number(index);
     if (!Number.isFinite(choiceIndex)) return;
     if (choiceIndex < 1 || choiceIndex > currentChoices.length) return;
+    pendingChoice = true;
+    advanceRequested = false;
+    advancePromptShown = false;
+    pendingScene = null;
     sendMessage({ t: "choice", index: choiceIndex });
   };
 
@@ -193,6 +280,7 @@
         return;
       }
       if (!msg || typeof msg !== "object") return;
+
       switch (msg.t) {
         case "mode":
           setMode(msg.value);
@@ -203,15 +291,30 @@
         case "line":
           if (msg.partial) {
             updateLastLine(msg.text, msg.type);
-          } else {
-            appendLine(msg.text, msg.type);
+            return;
           }
+          if (mode === "story" && String(msg.type).toLowerCase() === "system") {
+            handleOutcomeLine(msg.text || "");
+            return;
+          }
+          if (awaitingAdvance) {
+            return;
+          }
+          appendLine(msg.text, msg.type);
           return;
         case "lines":
           if (Array.isArray(msg.items)) {
             msg.items.forEach((item) => {
               if (item && item.partial) {
                 updateLastLine(item.text, item.type);
+              } else if (
+                item &&
+                mode === "story" &&
+                String(item.type).toLowerCase() === "system"
+              ) {
+                handleOutcomeLine(item.text || "");
+              } else if (awaitingAdvance) {
+                return;
               } else if (item) {
                 appendLine(item.text, item.type);
               }
@@ -229,6 +332,20 @@
         case "storyScene":
         case "StoryScene":
           setMode("story");
+          if (awaitingAdvance) {
+            pendingScene = msg;
+            if (!advancePromptShown) {
+              handleOutcomeLine("");
+            }
+            return;
+          }
+          if (pendingChoice) {
+            pendingScene = msg;
+            if (!advancePromptShown) {
+              handleOutcomeLine("");
+            }
+            return;
+          }
           renderStoryScene(msg);
           return;
         default:
@@ -272,6 +389,17 @@
     sendMessage({ t: "input", text });
   };
 
+  const handleStorySubmit = () => {
+    const raw = storyInput.value.trim();
+    if (!raw) return;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    storyInput.value = "";
+    handleChoice(parsed);
+  };
+
   promptInput.addEventListener("keydown", (event) => {
     if (mode !== "terminal") return;
     if (event.key === "Enter") {
@@ -311,10 +439,28 @@
     }
   });
 
+  storyInput.addEventListener("keydown", (event) => {
+    if (mode !== "story") return;
+    if (event.key === "Enter" && !awaitingAdvance) {
+      event.preventDefault();
+      handleStorySubmit();
+    }
+  });
+
   window.addEventListener("keydown", (event) => {
     if (mode !== "story") return;
-    if (event.key >= "1" && event.key <= "9") {
-      handleChoice(event.key);
+    if (event.key === "Enter" && awaitingAdvance) {
+      event.preventDefault();
+      if (pendingScene) {
+        awaitingAdvance = false;
+        pendingChoice = false;
+        clearScrollback();
+        const nextScene = pendingScene;
+        pendingScene = null;
+        renderStoryScene(nextScene);
+      } else {
+        advanceRequested = true;
+      }
     }
   });
 
@@ -343,4 +489,56 @@
   setMode("terminal");
   setConnection(false);
   connect();
+
+  function runTypingQueue() {
+    if (typingActive || !typingQueue.length) return;
+    const item = typingQueue.shift();
+    if (!item) return;
+    typingActive = true;
+
+    const text = item.text ?? "";
+    const maxChars = TYPING.maxCharsPerLine;
+    const shouldType = TYPING.enabled && text.length <= maxChars;
+    const lineEl = createLineEl(shouldType ? "" : text, item.type);
+    scrollback.appendChild(lineEl);
+    capScrollback();
+    if (autoScroll) {
+      scrollToBottom();
+    }
+    updateJumpButton();
+
+    if (!shouldType) {
+      typingActive = false;
+      item.resolve?.();
+      runTypingQueue();
+      return;
+    }
+
+    let index = 0;
+    const step = () => {
+      if (!TYPING.enabled) {
+        lineEl.textContent = text;
+        typingActive = false;
+        item.resolve?.();
+        runTypingQueue();
+        return;
+      }
+      index += 1;
+      lineEl.textContent = text.slice(0, index);
+      if (autoScroll) {
+        scrollToBottom();
+      }
+      if (index < text.length) {
+        setTimeout(step, TYPING.charDelayMs);
+      } else {
+        setTimeout(() => {
+          typingActive = false;
+          item.resolve?.();
+          runTypingQueue();
+        }, TYPING.lineDelayMs);
+      }
+    };
+
+    setTimeout(step, TYPING.charDelayMs);
+  }
 })();
